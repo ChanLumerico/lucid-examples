@@ -1,2 +1,2 @@
-# lucid-examples
+# Lucid Examples 💎
 Real World Training Examples for Lucid Framework
