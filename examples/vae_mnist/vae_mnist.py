@@ -4,6 +4,7 @@ import lucid.nn.functional as F
 import lucid.optim as optim
 
 import lucid.datasets as datasets
+from lucid.data import DataLoader
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -19,8 +20,8 @@ class Encoder(nn.Module):
     def forward(self, x: lucid.Tensor) -> tuple[lucid.Tensor, lucid.Tensor]:
         h = F.relu(self.linear(x))
         mu = self.linear_mu(h)
-        logvar = self.linear_logvar(h)
 
+        logvar = self.linear_logvar(h).clip(-5.0, 5.0)
         sigma = lucid.exp(0.5 * logvar)
         return mu, sigma
 
@@ -74,6 +75,7 @@ class HierarchicalVAE(nn.Module):
                 self.decoders.append(Decoder(latent_dim, hidden_dim, latent_dim))
 
     def get_loss(self, x: lucid.Tensor) -> lucid.Tensor:
+        eps = 1e-6
         batch_size = x.shape[0]
 
         mus, sigmas, zs = [], [], []
@@ -99,12 +101,22 @@ class HierarchicalVAE(nn.Module):
             L_recon = F.mse_loss(x_hat, x, reduction="sum")
 
         mu_T, sigma_T = mus[-1], sigmas[-1]
-        L_kl = -lucid.sum(1 + lucid.log(sigma_T**2) - mu_T**2 - sigma_T**2)
+        mu_T = lucid.clip(mu_T, -5.0, 5.0)
+
+        sigma_sq_T = lucid.clip(sigma_T**2, min_value=eps)
+        log_sigma_sq_T = lucid.log(sigma_sq_T)
+
+        L_kl = -lucid.sum(1 + log_sigma_sq_T - mu_T**2 - sigma_sq_T)
 
         for i in range(self.num_layers - 1):
             mu_i, sigma_i = mus[i], sigmas[i]
             z_hat_i = z_hats[i]
-            L_kl += -lucid.sum(1 + sigma_i**2 - (mu_i - z_hat_i) ** 2 - sigma_i**2)
+
+            mu_i = lucid.clip(mu_i, -5.0, 5.0)
+            sigma_sq_i = lucid.clip(sigma_i**2, min_value=eps)
+            log_sigma_sq_i = lucid.log(sigma_sq_i)
+
+            L_kl += -lucid.sum(1 + log_sigma_sq_i - (mu_i - z_hat_i) ** 2 - sigma_sq_i)
 
         return (L_recon + L_kl) / batch_size
 
@@ -114,9 +126,76 @@ hidden_dim = 100
 latent_dim = 20
 
 num_layers = 2
-epochs = 2
+epochs = 30
 learning_rate = 1e-3
-batch_size = 64
+batch_size = 100
 
 
-# TODO: Continue from loading dataset
+dataset = datasets.MNIST(root="data/mnist/", train=True, download=False)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+model = HierarchicalVAE(input_dim, hidden_dim, latent_dim, num_layers, use_bce=True)
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+# scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+
+
+def normalize_img(img: lucid.Tensor) -> lucid.Tensor:
+    return (img.astype(lucid.Float32) / 255.0).reshape(img.shape[0], -1)
+
+
+def train_model():
+    losses = []
+    for epoch in range(epochs):
+        loss_sum = 0.0
+        cnt = 0
+        desc = f"Epoch {epoch + 1}/{epochs}"
+
+        with tqdm(dataloader, desc=desc, unit="batch") as pbar:
+            for x, _ in pbar:
+                x_norm = normalize_img(x)
+
+                optimizer.zero_grad()
+                loss = model.get_loss(x_norm).eval()
+                loss.backward()
+                optimizer.step()
+
+                losses.append(loss.item())
+                loss_sum += loss.item()
+                cnt += 1
+                pbar.set_postfix(avg_loss=loss_sum / cnt)
+
+        # scheduler.step()
+
+    plt.plot(losses, label="ELBO Loss")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title(f"{num_layers}-Hierarchy VAE on MNIST")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("train_loss.png")
+
+
+def generated_image():
+    model.eval()
+    z = lucid.random.randn(64, latent_dim)
+
+    with lucid.no_grad():
+        x_gen = model.decoders[0](z)
+    x_gen = x_gen.reshape(64, 28, 28).data
+
+    _, axes = plt.subplots(8, 8, figsize=(8, 8))
+    for ax, img in zip(axes.flatten(), x_gen):
+        ax.imshow(img, cmap="gray")
+        ax.axis("off")
+
+    plt.tight_layout()
+    plt.savefig("generated_img.png")
+
+
+if __name__ == "__main__":
+    print(model)
+    print(f"\nTotal Parameters: {model.parameter_size:,}\n")
+
+    train_model()
+    generated_image()
