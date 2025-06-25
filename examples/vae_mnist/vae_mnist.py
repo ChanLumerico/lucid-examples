@@ -122,13 +122,13 @@ class HierarchicalVAE(nn.Module):
 
 
 input_dim = 784
-hidden_dim = 100
+hidden_dim = 200
 latent_dim = 20
 
-num_layers = 2
+num_layers = 1
 epochs = 30
-learning_rate = 1e-3
-batch_size = 100
+learning_rate = 3e-4
+batch_size = 32
 
 
 dataset = datasets.MNIST(root="data/mnist/", train=True, download=False)
